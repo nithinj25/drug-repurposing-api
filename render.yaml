@@ -1,0 +1,17 @@
+# Render Deployment Configuration
+services:
+  - type: web
+    name: drug-repurposing-api
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/api.py
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PUBMED_API_KEY
+        sync: false
+      - key: PORT
+        value: 8000
+    healthCheckPath: /health

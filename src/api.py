@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import logging
 import sys
+import os
 from pathlib import Path
 
 # Ensure project root is on path

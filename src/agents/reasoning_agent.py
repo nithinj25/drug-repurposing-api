@@ -79,12 +79,12 @@ class DimensionType(Enum):
 
 # Score weights for composite calculation
 DIMENSION_WEIGHTS = {
-    DimensionType.CLINICAL_EVIDENCE: 0.25,
-    DimensionType.SAFETY_PROFILE: 0.25,
+    DimensionType.CLINICAL_EVIDENCE: 0.30,
+    DimensionType.SAFETY_PROFILE: 0.30,
     DimensionType.PATENT_FREEDOM: 0.15,
     DimensionType.MARKET_POTENTIAL: 0.15,
-    DimensionType.MOLECULAR_RATIONALE: 0.10,
-    DimensionType.REGULATORY_PATH: 0.10,
+    DimensionType.MOLECULAR_RATIONALE: 0.05,
+    DimensionType.REGULATORY_PATH: 0.05,
 }
 
 
@@ -186,15 +186,31 @@ class EvidenceAggregator:
         # Extract trial evidence
         trials = clinical_result.get("trials", [])
         for trial in trials:
+            status = (trial.get("status") or "").strip()
+            status_weight = trial.get("status_weight", 1.0)
+
+            evidence_list.append(Evidence(
+                evidence_id=f"clin_status_{trial.get('trial_id', 'unknown')}",
+                source_agent=EvidenceType.CLINICAL,
+                dimension=DimensionType.CLINICAL_EVIDENCE,
+                content=f"Trial status: {status} (weight {status_weight})",
+                confidence=min(1.0, 0.6 * max(status_weight, 0.0)),
+                polarity="negative" if status_weight < 0 else ("positive" if status_weight > 1.0 else "neutral"),
+                metadata={"trial_id": trial.get("trial_id"), "status": status, "status_weight": status_weight}
+            ))
+
             # Efficacy evidence
             efficacy = trial.get("efficacy_summary", "")
             if efficacy:
+                confidence = 0.8 if trial.get("phase") in ["Phase 3", "Phase 4"] else 0.6
+                if isinstance(status_weight, (int, float)):
+                    confidence = min(1.0, confidence * max(status_weight, 0.0))
                 evidence_list.append(Evidence(
                     evidence_id=f"clin_eff_{trial.get('trial_id', 'unknown')}",
                     source_agent=EvidenceType.CLINICAL,
                     dimension=DimensionType.CLINICAL_EVIDENCE,
                     content=efficacy,
-                    confidence=0.8 if trial.get("phase") in ["Phase 3", "Phase 4"] else 0.6,
+                    confidence=confidence,
                     polarity="positive" if "improved" in efficacy.lower() else "neutral",
                     metadata={"trial_id": trial.get("trial_id"), "phase": trial.get("phase")}
                 ))
@@ -313,7 +329,10 @@ class EvidenceAggregator:
         evidence_list = []
         
         # Market size
-        tam = market_result.get("tam_usd", 0)
+        tam = 0
+        tam_estimate = market_result.get("tam_estimate") or market_result.get("market_snapshot", {}).get("tam_estimate")
+        if isinstance(tam_estimate, dict):
+            tam = tam_estimate.get("tam_usd", 0)
         if tam:
             evidence_list.append(Evidence(
                 evidence_id=f"mkt_tam_{drug}_{indication}",
@@ -324,9 +343,27 @@ class EvidenceAggregator:
                 polarity="positive" if tam > 1e9 else "neutral",
                 metadata={"tam_usd": tam}
             ))
+
+        opportunity_score = market_result.get("market_opportunity_score")
+        if opportunity_score is None:
+            opportunity_score = market_result.get("market_snapshot", {}).get("market_opportunity_score")
+        if isinstance(opportunity_score, (int, float)):
+            evidence_list.append(Evidence(
+                evidence_id=f"mkt_opportunity_{drug}_{indication}",
+                source_agent=EvidenceType.MARKET,
+                dimension=DimensionType.MARKET_POTENTIAL,
+                content=f"Market opportunity score: {opportunity_score:.2f}",
+                confidence=0.75,
+                polarity="positive" if opportunity_score >= 0.7 else ("negative" if opportunity_score < 0.4 else "neutral"),
+                metadata={"market_opportunity_score": opportunity_score}
+            ))
         
         # Competitive intensity
-        competitor_count = market_result.get("competitor_count", 0)
+        competitor_count = market_result.get("competitor_count")
+        if competitor_count is None:
+            competitor_count = len(market_result.get("competitors", []))
+        if competitor_count is None:
+            competitor_count = 0
         evidence_list.append(Evidence(
             evidence_id=f"mkt_comp_{drug}_{indication}",
             source_agent=EvidenceType.MARKET,
@@ -344,16 +381,41 @@ class EvidenceAggregator:
         evidence_list = []
         
         # Publication count
-        pub_count = lit_result.get("publication_count", 0)
+        pub_count = lit_result.get("publication_count", lit_result.get("papers_found", 0))
+        competition_score = lit_result.get("competition_index_score")
+        sentiment_score = lit_result.get("sentiment_score")
+
         evidence_list.append(Evidence(
             evidence_id=f"lit_count_{drug}_{indication}",
             source_agent=EvidenceType.LITERATURE,
-            dimension=DimensionType.CLINICAL_EVIDENCE,
-            content=f"Literature support: {pub_count} publications",
-            confidence=0.6,
-            polarity="positive" if pub_count > 10 else "neutral",
+            dimension=DimensionType.MARKET_POTENTIAL,
+            content=f"Recent literature volume: {pub_count} publications",
+            confidence=0.55,
+            polarity="negative" if pub_count > 50 else ("neutral" if pub_count >= 10 else "positive"),
             metadata={"publication_count": pub_count}
         ))
+
+        if isinstance(competition_score, (int, float)):
+            evidence_list.append(Evidence(
+                evidence_id=f"lit_comp_{drug}_{indication}",
+                source_agent=EvidenceType.LITERATURE,
+                dimension=DimensionType.MARKET_POTENTIAL,
+                content=f"Competition index score: {competition_score:.2f}",
+                confidence=0.6,
+                polarity="positive" if competition_score >= 0.8 else ("negative" if competition_score < 0.4 else "neutral"),
+                metadata={"competition_index_score": competition_score}
+            ))
+
+        if isinstance(sentiment_score, (int, float)):
+            evidence_list.append(Evidence(
+                evidence_id=f"lit_sent_{drug}_{indication}",
+                source_agent=EvidenceType.LITERATURE,
+                dimension=DimensionType.CLINICAL_EVIDENCE,
+                content=f"Literature sentiment score: {sentiment_score:.2f}",
+                confidence=0.6,
+                polarity="positive" if sentiment_score >= 0.7 else ("negative" if sentiment_score < 0.4 else "neutral"),
+                metadata={"sentiment_score": sentiment_score}
+            ))
         
         # Key findings
         findings = lit_result.get("key_findings", [])

@@ -12,7 +12,7 @@ Architecture:
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import logging
 import requests
@@ -1008,6 +1008,67 @@ class LiteratureAgent:
                              drug_name: str, indication: str) -> Dict[str, Any]:
         """Return evidence items with confidence scores"""
         return self.summarizer.summarize_evidence(papers, drug_name, indication)
+
+    def _parse_publication_date(self, date_text: Optional[str]) -> Optional[datetime]:
+        if not date_text:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y/%m", "%Y"):
+            try:
+                return datetime.strptime(date_text.strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _filter_recent_papers(self, papers: List[LiteratureRecord], years: int = 5) -> List[LiteratureRecord]:
+        cutoff = datetime.utcnow() - timedelta(days=365 * years)
+        recent = []
+        for paper in papers:
+            pub_date = self._parse_publication_date(paper.metadata.publication_date)
+            if pub_date and pub_date >= cutoff:
+                recent.append(paper)
+        return recent
+
+    def _competition_index_score(self, count: int) -> float:
+        if count > 50:
+            return 0.2
+        if count >= 10:
+            return 0.6
+        return 0.9
+
+    def _extract_conclusion_text(self, abstract: str) -> str:
+        if not abstract:
+            return ""
+        sentences = [s.strip() for s in abstract.replace("\n", " ").split(".") if s.strip()]
+        if not sentences:
+            return ""
+        return ". ".join(sentences[-2:])
+
+    def _classify_conclusion_sentiment(self, text: str) -> str:
+        if not text:
+            return "INCONCLUSIVE"
+        text_lower = text.lower()
+        positive_terms = [
+            "significant", "improved", "effective", "benefit", "reduced",
+            "decreased", "promising", "supports", "efficacy",
+        ]
+        negative_terms = [
+            "no effect", "not effective", "failed", "worse", "adverse",
+            "no significant", "ineffective", "did not improve",
+        ]
+
+        if any(term in text_lower for term in negative_terms):
+            return "NEGATIVE_EFFICACY"
+        if any(term in text_lower for term in positive_terms):
+            return "POSITIVE_EFFICACY"
+        return "INCONCLUSIVE"
+
+    def _score_sentiment(self, labels: List[str]) -> float:
+        positive = sum(1 for l in labels if l == "POSITIVE_EFFICACY")
+        negative = sum(1 for l in labels if l == "NEGATIVE_EFFICACY")
+        total = positive + negative
+        if total == 0:
+            return 0.5
+        return positive / total
     
     def run(self, drug_name: str, indication: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """
@@ -1023,26 +1084,55 @@ class LiteratureAgent:
             query = f"{drug_name} {indication} mechanism efficacy safety"
             papers = self.ingestion_pipeline.ingest_papers(query, drug_name, indication)
             logger.info(f"Found {len(papers)} papers")
+
+            # 1a. Filter to last 5 years only
+            recent_papers = self._filter_recent_papers(papers, years=5)
+            filtered_out = len(papers) - len(recent_papers)
+            logger.info(f"Filtered to {len(recent_papers)} papers from last 5 years")
             
             # 2. Index papers
-            for paper in papers:
+            for paper in recent_papers:
                 self.index_manager.store_paper(paper)
             
             # 3. Summarize evidence
-            summary = self.summarizer.summarize_evidence(papers, drug_name, indication)
+            summary = self.summarizer.summarize_evidence(recent_papers, drug_name, indication)
+
+            # 4. Commercial viability signals
+            publication_count = len(recent_papers)
+            competition_index_score = self._competition_index_score(publication_count)
+            top_abstracts = [p.metadata.abstract for p in recent_papers[:10]]
+            sentiment_labels = [
+                self._classify_conclusion_sentiment(self._extract_conclusion_text(abstract))
+                for abstract in top_abstracts
+            ]
+            sentiment_score = self._score_sentiment(sentiment_labels)
+            sentiment_breakdown = {
+                "positive": sum(1 for l in sentiment_labels if l == "POSITIVE_EFFICACY"),
+                "negative": sum(1 for l in sentiment_labels if l == "NEGATIVE_EFFICACY"),
+                "inconclusive": sum(1 for l in sentiment_labels if l == "INCONCLUSIVE"),
+            }
             
             # 4. Compile result
             result = {
                 'agent': 'literature_agent',
                 'drug': drug_name,
                 'indication': indication,
-                'papers_found': len(papers),
-                'papers': [p.to_dict() for p in papers[:3]],
-                'total_claims': sum(len(p.claims) for p in papers),
+                'papers_found': len(recent_papers),
+                'publication_count': publication_count,
+                'papers': [p.to_dict() for p in recent_papers[:3]],
+                'total_claims': sum(len(p.claims) for p in recent_papers),
                 'evidence_summary': summary,
-                'summary': f"Identified {len(papers)} papers for {drug_name} in {indication}. "
-                          f"Extracted {sum(len(p.claims) for p in papers)} claims across mechanism, efficacy, and safety.",
-                'status': 'success' if len(papers) > 0 else 'partial',
+                'competition_index_score': competition_index_score,
+                'sentiment_score': sentiment_score,
+                'sentiment_breakdown': sentiment_breakdown,
+                'analysis_window_years': 5,
+                'filtered_out_older_papers': filtered_out,
+                'summary': (
+                    f"Identified {len(recent_papers)} papers from last 5 years for {drug_name} in {indication}. "
+                    f"Competition index {competition_index_score:.2f}; sentiment score {sentiment_score:.2f}. "
+                    f"Extracted {sum(len(p.claims) for p in recent_papers)} claims across mechanism, efficacy, and safety."
+                ),
+                'status': 'success' if len(recent_papers) > 0 else 'partial',
                 'timestamp': datetime.utcnow().isoformat(),
             }
             

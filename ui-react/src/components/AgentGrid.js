@@ -61,7 +61,7 @@ function AgentGrid({ tasks, agentIcons, onAgentClick }) {
             <div className="agent-card-status">{task.status || 'completed'}</div>
             <div className="agent-card-result">{truncateText(summary, 150)}</div>
             <button
-              className="btn btn-secondary"
+              className="btn btn-secondary light"
               onClick={() => onAgentClick({ type: 'agent', agentName, result })}
               style={{ width: '100%', marginTop: '1rem', fontSize: '0.9rem' }}
             >

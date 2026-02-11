@@ -809,6 +809,8 @@ class TrialEvidenceSummarizer:
         """
         summaries = []
         
+        status_weight = self._status_weight(trial.status)
+
         # 1. Efficacy summary (from primary outcomes)
         if focus in ["efficacy", "all"] and trial.primary_outcomes:
             drug_name = trial.drug_names[0] if trial.drug_names else "Unknown Drug"
@@ -819,12 +821,13 @@ class TrialEvidenceSummarizer:
                 summary_text = f"{drug_name} showed efficacy in {trial.indication} with {outcome.measure.lower()}."
             
             outcome = trial.primary_outcomes[0]
+            confidence_score = self._apply_status_weight(0.85, status_weight)
             summary = EvidenceSummary(
                 summary_id=str(uuid.uuid4()),
                 trial_id=trial.trial_id,
                 evidence_type="efficacy",
                 summary_text=summary_text,
-                confidence_score=0.85,
+                confidence_score=confidence_score,
                 excerpt=f"Primary Outcome: {outcome.measure}",
                 excerpt_source=trial.source_url,
             )
@@ -839,12 +842,13 @@ class TrialEvidenceSummarizer:
                 summary_text = f"Safety signal: {signal.ae_term} observed in {signal.frequency or 'some'} participants."
             
             signal = trial.safety_signals[0]
+            confidence_score = self._apply_status_weight(0.80, status_weight)
             summary = EvidenceSummary(
                 summary_id=str(uuid.uuid4()),
                 trial_id=trial.trial_id,
                 evidence_type="safety",
                 summary_text=summary_text,
-                confidence_score=0.80,
+                confidence_score=confidence_score,
                 excerpt=f"Adverse Event: {signal.ae_term}",
                 excerpt_source=trial.source_url,
             )
@@ -852,6 +856,24 @@ class TrialEvidenceSummarizer:
         
         logger.info(f"Generated {len(summaries)} evidence summaries for {trial.trial_id}")
         return summaries
+
+    def _status_weight(self, status: TrialStatus) -> float:
+        status_value = status.value if isinstance(status, TrialStatus) else str(status)
+        normalized = status_value.strip().upper()
+        if normalized == TrialStatus.RECRUITING.value.upper():
+            return 1.5
+        if normalized == TrialStatus.ACTIVE_NOT_RECRUITING.value.upper():
+            return 1.2
+        if normalized == TrialStatus.COMPLETED.value.upper():
+            return 1.0
+        if normalized in (TrialStatus.TERMINATED.value.upper(), TrialStatus.WITHDRAWN.value.upper()):
+            return -2.0
+        return 1.0
+
+    def _apply_status_weight(self, base_confidence: float, status_weight: float) -> float:
+        if status_weight < 0:
+            return 0.2
+        return min(1.0, base_confidence * status_weight)
     
     def _llm_summarize_efficacy(self, trial: TrialRecord) -> str:
         """Use LLM to generate efficacy summary"""
@@ -1089,12 +1111,18 @@ class ClinicalTrialsAgent:
                     all_evidence.append(evidence.to_dict())
             
             # 4. Compile result
+            trial_dicts = []
+            for trial in trials:
+                trial_dict = trial.to_dict()
+                trial_dict["status_weight"] = self.summarizer._status_weight(trial.status)
+                trial_dicts.append(trial_dict)
+
             result = {
                 'agent': 'clinical_agent',
                 'drug': drug_name,
                 'indication': indication,
                 'trials_found': len(trials),
-                'trials': [t.to_dict() for t in trials[:3]],  # Top 3 for brevity
+                'trials': trial_dicts[:3],  # Top 3 for brevity
                 'evidence_items': all_evidence,
                 'summary': f"Identified {len(trials)} clinical trials for {drug_name} in {indication}. "
                           f"Generated {len(all_evidence)} evidence items with high confidence.",

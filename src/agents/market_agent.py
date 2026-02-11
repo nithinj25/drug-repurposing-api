@@ -217,6 +217,8 @@ class MarketSnapshot:
     market_summary: str = ""
     key_insights: List[str] = field(default_factory=list)
     data_confidence_score: float = 0.7
+    market_opportunity_score: float = 0.6
+    prevalence_adjustment: float = 1.0
     embedding: Optional[List[float]] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     last_updated: datetime = field(default_factory=datetime.utcnow)
@@ -839,6 +841,20 @@ class MarketIngestionPipeline:
             snapshot.revenue_scenarios = self.analytics.generate_revenue_scenarios(
                 snapshot.tam_estimate, {}
             )
+
+            # Patient prevalence penalty/bonus
+            patient_pop = snapshot.tam_estimate.patient_population
+            if patient_pop > 1_000_000:
+                snapshot.prevalence_adjustment = 0.5
+            elif patient_pop < 200_000:
+                snapshot.prevalence_adjustment = 1.5
+            else:
+                snapshot.prevalence_adjustment = 1.0
+
+            snapshot.market_opportunity_score = max(
+                0.0,
+                min(1.0, snapshot.market_opportunity_score * snapshot.prevalence_adjustment)
+            )
         
         # Process competitors
         competitor_programs = self._normalize_competitors(competitor_data)
@@ -852,6 +868,17 @@ class MarketIngestionPipeline:
         
         # Generate insights
         snapshot.key_insights = self.analytics.generate_market_insights(snapshot)
+
+        if snapshot.tam_estimate:
+            pop = snapshot.tam_estimate.patient_population
+            if pop > 1_000_000:
+                snapshot.key_insights.append(
+                    "High prevalence population suggests competitive saturation risk."
+                )
+            elif pop < 200_000:
+                snapshot.key_insights.append(
+                    "Rare disease prevalence supports orphan-drug opportunity."
+                )
         
         # Generate summary
         snapshot.market_summary = self._generate_market_summary(snapshot)
@@ -1119,6 +1146,8 @@ class MarketAgent:
                 'go_to_market_risks': gtm_risks,
                 'market_phase': snapshot.market_phase.value,
                 'data_confidence': snapshot.data_confidence_score,
+                'market_opportunity_score': snapshot.market_opportunity_score,
+                'prevalence_adjustment': snapshot.prevalence_adjustment,
                 'status': 'success',
                 'timestamp': datetime.now(UTC).isoformat(),
             }

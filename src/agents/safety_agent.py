@@ -107,6 +107,7 @@ class SafetyAssessment:
     indication: Optional[str]
     safety_score: float  # 0-1, higher is safer
     risk_level: str  # green, amber, red
+    critical_safety_risk: bool
     red_flags: List[str]
     amber_flags: List[str]
     green_flags: List[str]
@@ -932,6 +933,14 @@ class SafetyAgent:
             boxed_warnings,
             contraindications
         )
+
+        # Grade 3+ adverse event veto
+        critical_safety_risk, critical_terms = self._detect_grade3_risk(
+            all_adverse_events,
+            boxed_warnings
+        )
+        if critical_safety_risk:
+            safety_score = 0.0
         
         # Determine risk level
         if safety_score >= 0.7:
@@ -950,6 +959,9 @@ class SafetyAgent:
             contraindications,
             dose_limiting_toxicities
         )
+
+        if critical_safety_risk:
+            red_flags.insert(0, f"CRITICAL SAFETY VETO: Grade 3+ AE keywords found ({', '.join(sorted(critical_terms))})")
         
         # 6. Generate summary
         logger.info("Generating safety summary...")
@@ -970,6 +982,7 @@ class SafetyAgent:
             indication=indication,
             safety_score=safety_score,
             risk_level=risk_level,
+            critical_safety_risk=critical_safety_risk,
             red_flags=red_flags,
             amber_flags=amber_flags,
             green_flags=green_flags,
@@ -985,6 +998,62 @@ class SafetyAgent:
         
         logger.info(f"Safety assessment complete: Score={safety_score:.2f}, Risk={risk_level}")
         return assessment
+
+    def _parse_frequency_ratio(self, frequency_text: Optional[str]) -> Optional[float]:
+        if not frequency_text:
+            return None
+        text = frequency_text.strip().lower()
+        if text.endswith("%"):
+            try:
+                return float(text.replace("%", "")) / 100.0
+            except ValueError:
+                return None
+        if "/" in text:
+            parts = text.split("/")
+            if len(parts) == 2:
+                try:
+                    numerator = float(parts[0])
+                    denominator = float(parts[1])
+                    if denominator > 0:
+                        return numerator / denominator
+                except ValueError:
+                    return None
+        return None
+
+    def _detect_grade3_risk(
+        self,
+        adverse_events: List[AdverseEvent],
+        boxed_warnings: List[str]
+    ) -> Tuple[bool, List[str]]:
+        keywords = [
+            "hospitalization",
+            "disabling",
+            "life-threatening",
+            "fatal",
+            "death",
+            "permanent damage",
+            "severe liver injury",
+            "anaphylaxis",
+        ]
+
+        matched_terms = set()
+
+        for warning in boxed_warnings:
+            warning_lower = warning.lower()
+            for keyword in keywords:
+                if keyword in warning_lower:
+                    matched_terms.add(keyword)
+
+        for ae in adverse_events:
+            ae_text = f"{ae.ae_term} {ae.meddra_term}".lower()
+            freq_ratio = self._parse_frequency_ratio(ae.frequency)
+            if freq_ratio is None or freq_ratio <= 0.01:
+                continue
+            for keyword in keywords:
+                if keyword in ae_text:
+                    matched_terms.add(keyword)
+
+        return (len(matched_terms) > 0), list(matched_terms)
     
     def export_assessment(self, assessment: SafetyAssessment, output_path: str):
         """Export assessment to JSON file"""

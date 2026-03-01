@@ -8,6 +8,7 @@ import requests
 import json
 import time
 import sys
+from datetime import datetime, timezone
 
 def test_api():
     """Run simple API tests"""
@@ -52,9 +53,10 @@ def test_api():
         response = requests.post(
             f"{base_url}/analyze",
             json=payload,
-            timeout=120
+            timeout=300
         )
         result = response.json()
+        _save_raw_response(result)
         
         if result.get('success'):
             data = result['data']
@@ -68,19 +70,49 @@ def test_api():
             
             if reasoning:
                 print(f"\n   === REASONING RESULTS ===")
-                print(f"   Composite Score: {reasoning['composite_score']:.2f}")
-                print(f"   Decision Level: {reasoning['decision_level']}")
-                
-                if reasoning.get('hypotheses'):
-                    hyp = reasoning['hypotheses'][0]
+                composite_score = reasoning.get('composite_score')
+                decision_level = reasoning.get('decision_level') or reasoning.get('decision')
+                hypotheses = reasoning.get('hypotheses') or []
+
+                if composite_score is None and hypotheses:
+                    composite_score = hypotheses[0].get('composite_score')
+                if decision_level is None and hypotheses:
+                    decision_level = hypotheses[0].get('decision')
+
+                if composite_score is not None:
+                    print(f"   Composite Score: {composite_score:.2f}")
+                else:
+                    print("   Composite Score: N/A")
+
+                if decision_level is not None:
+                    print(f"   Decision Level: {decision_level}")
+                else:
+                    print("   Decision Level: N/A")
+
+                if hypotheses:
+                    hyp = hypotheses[0]
                     print(f"\n   Top Hypothesis:")
                     print(f"   - Rank: {hyp.get('rank')}")
                     print(f"   - Hypothesis: {hyp.get('hypothesis', 'N/A')[:80]}...")
                     print(f"   - Recommendation: {hyp.get('recommendation', 'N/A')}")
-                    
+
                     print(f"\n   Dimension Scores:")
-                    for dim, score in hyp.get('dimension_scores', {}).items():
-                        print(f"      - {dim:12}: {score:.2f}")
+                    dim_scores = hyp.get('dimension_scores')
+                    if isinstance(dim_scores, dict):
+                        for dim, score in dim_scores.items():
+                            try:
+                                print(f"      - {dim:12}: {float(score):.2f}")
+                            except (TypeError, ValueError):
+                                print(f"      - {dim:12}: {score}")
+                    elif isinstance(dim_scores, list):
+                        for item in dim_scores:
+                            if isinstance(item, dict):
+                                dim = item.get('dimension') or item.get('name')
+                                score = item.get('score')
+                                if dim is not None and score is not None:
+                                    print(f"      - {dim:12}: {float(score):.2f}")
+                    else:
+                        print("      - No dimension scores available")
             
             # Print all agent task results
             if data.get('tasks'):
@@ -99,6 +131,7 @@ def test_api():
             
             print(f"\n   === FULL RESPONSE (JSON) ===")
             print(json.dumps(result, indent=2)[:2000] + "\n   ... (truncated for display)")
+            print(f"\n   Raw response saved to: {result.get('_raw_response_path', 'response file')}\n")
             
         else:
             print(f"✗ Analysis failed")
@@ -127,6 +160,18 @@ def test_api():
     print("  ALL TESTS COMPLETED SUCCESSFULLY! ✓")
     print("="*70 + "\n")
     return True
+
+
+def _save_raw_response(result):
+    """Save full API response to a timestamped JSON file."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"api_response_{timestamp}.json"
+    try:
+        with open(filename, "w", encoding="utf-8") as handle:
+            json.dump(result, handle, indent=2)
+        result["_raw_response_path"] = filename
+    except Exception as e:
+        print(f"⚠️  Could not save raw response: {e}")
 
 if __name__ == "__main__":
     test_api()
